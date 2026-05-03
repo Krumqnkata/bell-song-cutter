@@ -134,12 +134,54 @@ def find_best_percussive(y, sr, clip_dur, t_start, t_end):
     return times, scores
 
 
+def find_best_smart_bell(y, sr, clip_dur, t_start, t_end):
+    hop = 512
+    # 1. Силна атака (onset)
+    onset_env = librosa.onset.onset_strength(y=y, sr=sr, hop_length=hop)
+    # 2. Сила на звука (RMS)
+    rms = librosa.feature.rms(y=y, frame_length=2048, hop_length=hop)[0]
+    
+    # Комбинираме с тежест: повече Onset, за да уловим "удара"
+    scores_raw = onset_env * 0.7 + (rms / (np.max(rms) + 1e-9)) * 0.3
+    
+    times = librosa.frames_to_time(np.arange(len(scores_raw)), sr=sr, hop_length=hop)
+    mask = (times >= t_start) & (times <= t_end - clip_dur)
+    
+    clip_f = int(clip_dur * sr / hop)
+    # Конволюция за гладкост, но с тежест в началото (атаката)
+    kernel = np.linspace(1.0, 0.2, clip_f) 
+    scores = np.convolve(scores_raw, kernel, mode='same')
+    
+    scores[~mask] = 0
+    return times, scores
+
+
+def find_best_fusion(y, sr, clip_dur, t_start, t_end):
+    # Вземаме сурови резултати
+    t1, s1 = find_best_smart_bell(y, sr, clip_dur, t_start, t_end)
+    _, s2 = find_best_percussive(y, sr, clip_dur, t_start, t_end)
+    _, s3 = find_best_chorus(y, sr, clip_dur, t_start, t_end)
+    _, s4 = find_best_onset(y, sr, clip_dur, t_start, t_end)
+    
+    # Нормализация
+    s1 /= (np.max(s1) + 1e-9)
+    s2 /= (np.max(s2) + 1e-9)
+    s3 /= (np.max(s3) + 1e-9)
+    s4 /= (np.max(s4) + 1e-9)
+    
+    # Гласуване (тегла)
+    fusion = (s1 * 0.4) + (s4 * 0.3) + (s2 * 0.2) + (s3 * 0.1)
+    return t1, fusion
+
+
 METHODS = {
-    "beat":       ("🥁 Beat – синхронизиран с удар",      find_best_beat),
-    "energy":     ("⚡ Energy – най-висока енергия",      find_best_energy),
-    "chorus":     ("🎵 Chorus – структурен анализ",      find_best_chorus),
-    "onset":      ("🎯 Onset – прецизно начало",         find_best_onset),
-    "percussive": ("🥁 Percussive – ударен акцент",      find_best_percussive),
+    "fusion":     ("🚀 Fusion – Комбинира Smart, Onset, Percussive и Chorus", find_best_fusion),
+    "smart":      ("🔔 Smart Bell – Onset + RMS енергия", find_best_smart_bell),
+    "beat":       ("🥁 Beat – Синхронизиран с темпо", find_best_beat),
+    "energy":     ("⚡ Energy – Най-силна част", find_best_energy),
+    "chorus":     ("🎵 Chorus – Структурен повтор", find_best_chorus),
+    "onset":      ("🎯 Onset – Прецизно начало", find_best_onset),
+    "percussive": ("🥁 Percussive – Само ударни", find_best_percussive),
 }
 
 def top_candidates(times, scores, clip_dur, sr, n=3):
@@ -404,16 +446,17 @@ class BellCutterApp(ctk.CTk):
         # Метод
         ctk.CTkLabel(sf, text="Метод:", width=150, anchor="w").grid(
             row=1, column=0, sticky="w", pady=4)
-        self.method_var = ctk.StringVar(value="beat")
+        self.method_var = ctk.StringVar(value="fusion")
         method_menu = ctk.CTkOptionMenu(
             sf, variable=self.method_var,
             values=list(METHODS.keys()),
-            command=self._on_method_change, width=280)
+            width=200)
         method_menu.grid(row=1, column=1, sticky="w")
-        self.method_desc = ctk.CTkLabel(sf, text=METHODS["beat"][0],
-                                         text_color=FG_MUTED,
-                                         font=ctk.CTkFont(size=11))
-        self.method_desc.grid(row=2, column=1, columnspan=2, sticky="w", pady=(0,6))
+        
+        # Бутон за информация
+        ctk.CTkButton(sf, text="ℹ️", width=40,
+                      fg_color="#444466", hover_color="#555588",
+                      command=self._show_algo_info).grid(row=1, column=1, sticky="e", padx=(0, 40))
 
         # Fade In
         ctk.CTkLabel(sf, text="Fade-in (сек):", width=150, anchor="w").grid(
@@ -589,6 +632,29 @@ class BellCutterApp(ctk.CTk):
         
         hint = "  LUFS = loudness стандарт (препоръчително)" if mode == "lufs" else "  Peak = максимална стойност (dB)"
         self.norm_mode_hint.configure(text=hint)
+
+    def _show_algo_info(self):
+        popup = ctk.CTkToplevel(self)
+        popup.title("Информация за алгоритмите")
+        popup.geometry("600x450")
+        popup.grab_set()
+        
+        info_text = (
+            "🚀 Fusion: Комбинира най-доброто от всички методи чрез тегловно гласуване за максимална точност.\n\n"
+            "🔔 Smart Bell: Съчетава ударни атаки (Onset detection) и обща енергия (RMS) за откриване на звуци с 'удар' като звънец.\n\n"
+            "🥁 Beat: Анализира темпото на песента и търси най-подходящите удари.\n\n"
+            "⚡ Energy: Фокусира се върху частите от песента с най-висока средна сила на звука.\n\n"
+            "🎵 Chorus: Търси повтарящи се структури в песента (напр. припев).\n\n"
+            "🎯 Onset: Идентифицира прецизното начало на звукови събития.\n\n"
+            "🥁 Percussive: Изолира ударните елементи (барабани и удари) чрез спектрален анализ."
+        )
+        
+        txt = ctk.CTkTextbox(popup, width=560, height=350, fg_color="transparent")
+        txt.insert("0.0", info_text)
+        txt.configure(state="disabled")
+        txt.pack(padx=20, pady=20)
+        
+        ctk.CTkButton(popup, text="Затвори", command=popup.destroy).pack(pady=10)
 
     def _stop_preview(self):
         if PYGAME_OK:

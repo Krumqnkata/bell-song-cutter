@@ -451,11 +451,19 @@ class BellCutterApp(ctk.CTk):
             inner = ctk.CTkFrame(parent, fg_color="transparent")
             inner.grid(row=row, column=1, sticky="w", padx=(0,12))
             lbl = ctk.CTkLabel(inner, text=fmt.format(default) + f" {suffix}", width=80)
-            def _upd(v, l=lbl, f=fmt, s=suffix): l.configure(text=f.format(float(v)) + f" {s}")
+            
+            # Динамично обновяване, което чете текущия suffix от sl
+            def _upd(v, sl=None): 
+                sl.unit_label.configure(text=f"{sl.fmt.format(float(v))} {sl.unit_suffix}")
+            
             sl = ctk.CTkSlider(inner, from_=from_, to=to_, variable=var,
-                               width=width, command=_upd)
+                               width=width)
+            sl.configure(command=lambda v: _upd(v, sl))
             sl.pack(side="left")
             lbl.pack(side="left", padx=6)
+            sl.unit_label = lbl 
+            sl.unit_suffix = suffix
+            sl.fmt = fmt
             return sl
 
         # Нормализация toggle + mode + target
@@ -568,14 +576,23 @@ class BellCutterApp(ctk.CTk):
         self.norm_target_slider.configure(state=state)
 
     def _on_norm_mode(self, mode):
-        if mode == "lufs":
-            self.norm_target_slider.configure(from_=-23, to=-6)
-            self.norm_target_var.set(-14.0)
-            self.norm_mode_hint.configure(text="  LUFS = loudness стандарт (препоръчително)")
-        else:
-            self.norm_target_slider.configure(from_=-6, to=-0.1)
-            self.norm_target_var.set(-1.0)
-            self.norm_mode_hint.configure(text="  Peak = максимална стойност (dB)")
+        # Update slider range and unit
+        suffix = "LUFS" if mode == "lufs" else "dB"
+        val = -14.0 if mode == "lufs" else -1.0
+        
+        self.norm_target_slider.configure(from_=-23 if mode=="lufs" else -6, 
+                                          to=-6 if mode=="lufs" else -0.1)
+        self.norm_target_var.set(val)
+        
+        # Update label text directly
+        self.norm_target_slider.unit_label.configure(text=f"{val:.1f} {suffix}")
+        
+        hint = "  LUFS = loudness стандарт (препоръчително)" if mode == "lufs" else "  Peak = максимална стойност (dB)"
+        self.norm_mode_hint.configure(text=hint)
+
+    def _stop_preview(self):
+        if PYGAME_OK:
+            pygame.mixer.music.stop()
 
     def _update_dur_label(self, v):
         self.dur_label.configure(text=f"{float(v):.0f} сек")
@@ -726,10 +743,17 @@ class BellCutterApp(ctk.CTk):
             self._cand_buttons.append(sel_btn)
 
             if PYGAME_OK:
+                # Preview button
                 ctk.CTkButton(
                     row, text="▶ Пусни", width=74,
                     fg_color="#1a3a5c", hover_color="#1e4d80",
                     command=lambda bt=t: self._preview(bt, clip_dur)
+                ).pack(side="left", padx=(0, 5), pady=6)
+                # Stop button
+                ctk.CTkButton(
+                    row, text="⏹ Спри", width=74,
+                    fg_color="#5c1a1a", hover_color="#801e1e",
+                    command=self._stop_preview
                 ).pack(side="left", padx=(0, 10), pady=6)
 
         self._best_time = cands[0][0]

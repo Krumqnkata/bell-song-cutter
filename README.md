@@ -16,6 +16,8 @@ pip install customtkinter librosa pydub numpy scipy pygame
 | **`pydub`** | Манипулация на аудио файлове. |
 | **`numpy` & `scipy`** | Математически изчисления за обработка на сигнала. |
 | **`pygame`** | Възпроизвеждане на аудиото в реално време (Preview). |
+
+
 🎬 FFmpeg: Инсталация и значение
 Защо е необходим?
 

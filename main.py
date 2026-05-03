@@ -66,6 +66,26 @@ def fmt_time(s: float) -> str:
     sec = s - m * 60
     return f"{m}:{sec:05.2f}"
 
+def format_time_ms(s: float) -> str:
+    """Форматира секунди в MM:SS.ss"""
+    m = int(s) // 60
+    sec = s - m * 60
+    return f"{m:02d}:{sec:05.2f}"
+
+def parse_time(ts: str) -> float:
+    """Парсва MM:SS.ss или секунди обратно в float"""
+    try:
+        ts = ts.strip()
+        if ":" in ts:
+            parts = ts.split(":")
+            if len(parts) == 2:
+                return int(parts[0]) * 60 + float(parts[1])
+            elif len(parts) == 3: # HH:MM:SS
+                return int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
+        return float(ts)
+    except:
+        return 0.0
+
 
 def find_best_energy(y, sr, clip_dur, t_start, t_end):
     hop = 512
@@ -774,63 +794,129 @@ class BellCutterApp(ctk.CTk):
                          text_color=DANGER).pack(pady=12)
             return
 
-        self._selected_idx = 0  # индекс на избрания кандидат
-        self._cand_buttons = []
+        self._selected_idx = 0 
+        self._cand_vars = [] 
+        self._cand_buttons = [] # Нулиране
 
-        for rank, (t, score) in enumerate(cands):
-            row = ctk.CTkFrame(self.results_frame, fg_color="#252535", corner_radius=8)
-            row.pack(fill="x", padx=10, pady=5)
+        for rank, (t_orig, score) in enumerate(cands):
+            # Променливи за този кандидат в MM:SS.ss формат
+            sv = ctk.StringVar(value=format_time_ms(t_orig))
+            ev = ctk.StringVar(value=format_time_ms(t_orig + clip_dur))
+            self._cand_vars.append({
+                "start": sv, "end": ev, "orig_start": t_orig, "orig_dur": clip_dur
+            })
+
+            outer = ctk.CTkFrame(self.results_frame, fg_color="#252535", corner_radius=10)
+            outer.pack(fill="x", padx=10, pady=8)
+
+            # Ред 1: Заглавие, Бар за резултат, Бутон за избор
+            top_row = ctk.CTkFrame(outer, fg_color="transparent")
+            top_row.pack(fill="x", padx=10, pady=(10, 5))
 
             badge_color = ACCENT if rank == 0 else "#444466"
-            ctk.CTkLabel(row, text=f" #{rank+1} ", fg_color=badge_color,
+            ctk.CTkLabel(top_row, text=f" #{rank + 1} ", fg_color=badge_color,
                          corner_radius=6, font=ctk.CTkFont(size=12, weight="bold"),
-                         width=36).pack(side="left", padx=(10,8), pady=10)
+                         width=36).pack(side="left", padx=(0,10))
 
-            info = (f"  {fmt_time(t)}  →  {fmt_time(t + clip_dur)}"
-                    f"   ({clip_dur:.0f} сек)")
-            ctk.CTkLabel(row, text=info, font=ctk.CTkFont(size=13),
-                         anchor="w").pack(side="left", expand=True, fill="x")
-
-            bar_frame = ctk.CTkFrame(row, fg_color="#1a1a2e", width=120, height=8,
-                                      corner_radius=4)
-            bar_frame.pack(side="left", padx=8)
+            # Score bar
+            bar_frame = ctk.CTkFrame(top_row, fg_color="#1a1a2e", width=120, height=8, corner_radius=4)
+            bar_frame.pack(side="left", padx=5)
             bar_frame.pack_propagate(False)
             norm = score / (cands[0][1] + 1e-9)
-            bar = ctk.CTkFrame(bar_frame, fg_color=ACCENT,
-                               width=int(120 * norm), height=8, corner_radius=4)
-            bar.place(x=0, y=0)
+            ctk.CTkFrame(bar_frame, fg_color=ACCENT, width=int(120 * norm), height=8, corner_radius=4).place(x=0, y=0)
 
+            # Select button
             sel_btn = ctk.CTkButton(
-                row, text="✔ Избери", width=80,
+                top_row, text="✔ Избери", width=80, height=28,
                 fg_color="#2d5016" if rank == 0 else "#333344",
                 hover_color="#3d7020",
-                command=lambda r=rank, bt=t: self._select_candidate(r, bt))
-            sel_btn.pack(side="left", padx=4, pady=6)
+                command=lambda r=rank: self._select_candidate(r))
+            sel_btn.pack(side="right", padx=5)
             self._cand_buttons.append(sel_btn)
 
+            # Ред 2: Контроли за време
+            ctrl_row = ctk.CTkFrame(outer, fg_color="#1e1e2e", corner_radius=6)
+            ctrl_row.pack(fill="x", padx=10, pady=5)
+
+            # Start controls
+            ctk.CTkLabel(ctrl_row, text="Старт:", font=ctk.CTkFont(size=11)).pack(side="left", padx=(5,2))
+            ctk.CTkButton(ctrl_row, text="-", width=24, height=24, command=lambda r=rank: self._adj_time(r, "start", -1)).pack(side="left", padx=1)
+            ctk.CTkEntry(ctrl_row, textvariable=sv, width=70, height=24, font=ctk.CTkFont(size=12)).pack(side="left", padx=2)
+            ctk.CTkButton(ctrl_row, text="+", width=24, height=24, command=lambda r=rank: self._adj_time(r, "start", 1)).pack(side="left", padx=1)
+
+            # End controls
+            ctk.CTkLabel(ctrl_row, text=" Край:", font=ctk.CTkFont(size=11)).pack(side="left", padx=(10,2))
+            ctk.CTkButton(ctrl_row, text="-", width=24, height=24, command=lambda r=rank: self._adj_time(r, "end", -1)).pack(side="left", padx=1)
+            ctk.CTkEntry(ctrl_row, textvariable=ev, width=70, height=24, font=ctk.CTkFont(size=12)).pack(side="left", padx=2)
+            ctk.CTkButton(ctrl_row, text="+", width=24, height=24, command=lambda r=rank: self._adj_time(r, "end", 1)).pack(side="left", padx=1)
+
+            # Reset button
+            ctk.CTkButton(ctrl_row, text="🔄", width=32, height=24, fg_color="#444455", command=lambda r=rank: self._reset_cand(r)).pack(side="left", padx=(10,0))
+
+            # Продължителност (динамично изчисляване)
+            dv = ctk.StringVar()
+            def _upd_dur(*args, s=sv, e=ev, d=dv):
+                try:
+                    dur = parse_time(e.get()) - parse_time(s.get())
+                    if dur > 0:
+                        d.set(f"⏱ {dur:.2f} сек")
+                    else:
+                        d.set("⚠️ Невалидно")
+                except: d.set("⚠️ Грешка")
+            
+            sv.trace_add("write", _upd_dur)
+            ev.trace_add("write", _upd_dur)
+            _upd_dur() # Инициализация
+            
+            ctk.CTkLabel(ctrl_row, textvariable=dv, font=ctk.CTkFont(size=11, slant="italic"), 
+                         text_color=SUCCESS).pack(side="left", padx=(15,0))
+
+            # Ред 3: Play/Stop
+            btn_row = ctk.CTkFrame(outer, fg_color="transparent")
+            btn_row.pack(fill="x", padx=10, pady=(5, 10))
+
             if PYGAME_OK:
-                # Preview button
                 ctk.CTkButton(
-                    row, text="▶ Пусни", width=74,
+                    btn_row, text="▶ Пусни", width=74, height=28,
                     fg_color="#1a3a5c", hover_color="#1e4d80",
-                    command=lambda bt=t: self._preview(bt, clip_dur)
-                ).pack(side="left", padx=(0, 5), pady=6)
-                # Stop button
+                    command=lambda r=rank: self._preview_cand(r)
+                ).pack(side="left", padx=(0, 5))
+                
                 ctk.CTkButton(
-                    row, text="⏹ Спри", width=74,
+                    btn_row, text="⏹ Спри", width=74, height=28,
                     fg_color="#5c1a1a", hover_color="#801e1e",
                     command=self._stop_preview
-                ).pack(side="left", padx=(0, 10), pady=6)
+                ).pack(side="left")
 
-        self._best_time = cands[0][0]
+        self._best_time = cands[0][0] # Първоначално задаване
         self.cut_btn.configure(state="normal")
 
-    def _select_candidate(self, rank, start_time):
+    def _adj_time(self, rank, field, delta):
+        try:
+            var = self._cand_vars[rank][field]
+            val = parse_time(var.get()) + delta
+            var.set(format_time_ms(max(0, val)))
+        except: pass
+
+    def _reset_cand(self, rank):
+        data = self._cand_vars[rank]
+        data["start"].set(format_time_ms(data["orig_start"]))
+        data["end"].set(format_time_ms(data["orig_start"] + data["orig_dur"]))
+
+    def _select_candidate(self, rank):
         self._selected_idx = rank
-        self._best_time = start_time
         for i, btn in enumerate(self._cand_buttons):
             btn.configure(fg_color="#2d5016" if i == rank else "#333344",
                           text="✔ Избран" if i == rank else "✔ Избери")
+
+    def _preview_cand(self, rank):
+        try:
+            start = parse_time(self._cand_vars[rank]["start"].get())
+            end = parse_time(self._cand_vars[rank]["end"].get())
+            dur = end - start
+            if dur <= 0: return
+            self._preview(start, dur)
+        except: pass
 
     def _preview(self, start_sec, dur_sec):
         if not PYGAME_OK:
@@ -838,33 +924,23 @@ class BellCutterApp(ctk.CTk):
         def worker():
             try:
                 check_ffmpeg()
-
-                # Папка song_cache до скрипта
                 script_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
                 cache_dir  = os.path.join(script_dir, "song_cache")
                 os.makedirs(cache_dir, exist_ok=True)
                 preview_path = os.path.join(cache_dir, "preview.wav")
 
-                # Спри pygame и изчакай да освободи файла преди да пишем
                 pygame.mixer.music.stop()
                 pygame.mixer.music.unload()
                 import time; time.sleep(0.15)
 
-                # Изрежи директно с ffmpeg – без pydub, без ffprobe
-                start_str = str(round(start_sec, 3))
-                dur_str   = str(round(dur_sec,   3))
                 cmd = [
-                    _FFMPEG_PATH,
-                    "-y",                      # презапиши без питане
-                    "-ss", start_str,          # начало
+                    _FFMPEG_PATH, "-y", "-ss", str(round(start_sec, 3)),
                     "-i",  self.input_var.get(),
-                    "-t",  dur_str,            # дължина
+                    "-t",  str(round(dur_sec, 3)),
                     "-af", f"afade=t=in:d={self.fadein_var.get():.2f},"
                            f"afade=t=out:st={dur_sec - self.fadeout_var.get():.2f}"
                            f":d={self.fadeout_var.get():.2f}",
-                    "-ar", "44100",
-                    "-ac", "2",
-                    preview_path
+                    "-ar", "44100", "-ac", "2", preview_path
                 ]
                 import subprocess
                 result = subprocess.run(cmd, capture_output=True)
@@ -875,16 +951,23 @@ class BellCutterApp(ctk.CTk):
                 pygame.mixer.music.play()
             except Exception as ex:
                 msg = str(ex) if str(ex) and str(ex).strip() not in ("None", "") else repr(ex)
-                self.after(0, lambda m=msg: messagebox.showwarning(
-                    "Предварителен преглед", f"Грешка: {m}"))
+                self.after(0, lambda m=msg: messagebox.showwarning("Предварителен преглед", f"Грешка: {m}"))
 
         threading.Thread(target=worker, daemon=True).start()
 
     # ── Рязане ─────────────────────────────────
 
     def _do_cut(self):
-        if self._best_time is None:
-            messagebox.showwarning("Внимание", "Първо анализирай песента.")
+        try:
+            rank = self._selected_idx
+            start = parse_time(self._cand_vars[rank]["start"].get())
+            end = parse_time(self._cand_vars[rank]["end"].get())
+            clip_dur = end - start
+            if clip_dur <= 0:
+                messagebox.showwarning("Внимание", "Невалидна дължина.")
+                return
+        except:
+            messagebox.showwarning("Внимание", "Провери времената на избрания кандидат.")
             return
 
         filepath = self.input_var.get()
@@ -893,10 +976,8 @@ class BellCutterApp(ctk.CTk):
             base, _ = os.path.splitext(filepath)
             output  = f"{base}_bell.mp3"
 
-        clip_dur = float(self.dur_var.get())
         fade_in  = float(self.fadein_var.get())
         fade_out = float(self.fadeout_var.get())
-        start    = self._best_time
 
         audio_settings = {
             "volume_db":   self.vol_var.get(),

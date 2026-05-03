@@ -38,6 +38,8 @@ if missing:
 
 try:
     import pygame
+    # Инициализация с по-високо качество и по-голям буфер против накъсване
+    pygame.mixer.pre_init(44100, -16, 2, 2048)
     pygame.mixer.init()
     PYGAME_OK = True
 except Exception:
@@ -921,6 +923,19 @@ class BellCutterApp(ctk.CTk):
     def _preview(self, start_sec, dur_sec):
         if not PYGAME_OK:
             return
+        
+        # Вземи текущите аудио настройки, за да се чуват и в прегледа
+        audio_settings = {
+            "volume_db":   self.vol_var.get(),
+            "bass_db":     self.bass_var.get(),
+            "treble_db":   self.treble_var.get(),
+            "normalize":   self.norm_var.get(),
+            "norm_mode":   self.norm_mode_var.get(),
+            "norm_target": self.norm_target_var.get()
+        }
+        fade_in  = float(self.fadein_var.get())
+        fade_out = float(self.fadeout_var.get())
+
         def worker():
             try:
                 check_ffmpeg()
@@ -933,13 +948,14 @@ class BellCutterApp(ctk.CTk):
                 pygame.mixer.music.unload()
                 import time; time.sleep(0.15)
 
+                # Използваме същата логика за филтри като при запис
+                af = build_af_filter(fade_in, fade_out, dur_sec, audio_settings)
+
                 cmd = [
                     _FFMPEG_PATH, "-y", "-ss", str(round(start_sec, 3)),
                     "-i",  self.input_var.get(),
                     "-t",  str(round(dur_sec, 3)),
-                    "-af", f"afade=t=in:d={self.fadein_var.get():.2f},"
-                           f"afade=t=out:st={dur_sec - self.fadeout_var.get():.2f}"
-                           f":d={self.fadeout_var.get():.2f}",
+                    "-af", af,
                     "-ar", "44100", "-ac", "2", preview_path
                 ]
                 import subprocess

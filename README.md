@@ -410,7 +410,7 @@ FFmpeg `loudnorm` в единичен проход дава приблизите
 
 ## 📄 Лиценз
 
-MIT License — виж [LICENSE](LICENSE) файла.
+MIT License — виж [LICENSE](https://github.com/Krumqnkata/bell-song-cutter/blob/main/LICENSE.md) файла.
 
 ---
 

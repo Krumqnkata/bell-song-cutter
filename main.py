@@ -347,7 +347,7 @@ class BellCutterApp(ctk.CTk):
     def __init__(self):
         super().__init__()
         self.title("🔔 School Bell Cutter")
-        self.geometry("780x820")
+        self.minsize(780, 600)
         self.resizable(True, True)
         self.configure(fg_color=BG_MAIN)
 
@@ -373,6 +373,8 @@ class BellCutterApp(ctk.CTk):
         # FIX #16: Спираме pygame чисто при затваряне на прозореца
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
+        self.after(50, self._maximize)
+
     # ── Lifecycle ──────────────────────────────
 
     def _on_close(self):
@@ -384,7 +386,13 @@ class BellCutterApp(ctk.CTk):
             except Exception:
                 pass
         self.destroy()
-
+    
+    def _maximize(self):
+        """Максимизира прозореца след пълно рендериране на UI."""
+        try:
+            self.state("zoomed")
+        except Exception:
+            self.attributes("-zoomed", True)
     # ── UI builder ──────────────────────────────
 
     def _check_ffmpeg_on_start(self):

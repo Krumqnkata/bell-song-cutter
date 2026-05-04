@@ -38,7 +38,6 @@ if missing:
 
 try:
     import pygame
-    # Инициализация с по-високо качество и по-голям буфер против накъсване
     pygame.mixer.pre_init(44100, -16, 2, 2048)
     pygame.mixer.init()
     PYGAME_OK = True
@@ -82,10 +81,11 @@ def parse_time(ts: str) -> float:
             parts = ts.split(":")
             if len(parts) == 2:
                 return int(parts[0]) * 60 + float(parts[1])
-            elif len(parts) == 3: # HH:MM:SS
+            elif len(parts) == 3:
                 return int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
         return float(ts)
-    except:
+    except (ValueError, IndexError):
+        # FIX #12: Конкретен тип изключение вместо голо except:
         return 0.0
 
 
@@ -102,7 +102,9 @@ def find_best_energy(y, sr, clip_dur, t_start, t_end):
 
 def find_best_beat(y, sr, clip_dur, t_start, t_end):
     hop   = 512
-    tempo, beats = librosa.beat.beat_track(y=y, sr=sr)
+    result = librosa.beat.beat_track(y=y, sr=sr)
+    # FIX #3: librosa ≥ 0.10 връща (tempo_array, beats) – нормализираме
+    beats = result[1]
     beat_times   = librosa.frames_to_time(beats, sr=sr)
     valid = beat_times[(beat_times >= t_start) & (beat_times <= t_end - clip_dur)]
     if len(valid) == 0:
@@ -158,40 +160,27 @@ def find_best_percussive(y, sr, clip_dur, t_start, t_end):
 
 def find_best_smart_bell(y, sr, clip_dur, t_start, t_end):
     hop = 512
-    # 1. Силна атака (onset)
     onset_env = librosa.onset.onset_strength(y=y, sr=sr, hop_length=hop)
-    # 2. Сила на звука (RMS)
     rms = librosa.feature.rms(y=y, frame_length=2048, hop_length=hop)[0]
-    
-    # Комбинираме с тежест: повече Onset, за да уловим "удара"
     scores_raw = onset_env * 0.7 + (rms / (np.max(rms) + 1e-9)) * 0.3
-    
     times = librosa.frames_to_time(np.arange(len(scores_raw)), sr=sr, hop_length=hop)
     mask = (times >= t_start) & (times <= t_end - clip_dur)
-    
     clip_f = int(clip_dur * sr / hop)
-    # Конволюция за гладкост, но с тежест в началото (атаката)
-    kernel = np.linspace(1.0, 0.2, clip_f) 
+    kernel = np.linspace(1.0, 0.2, clip_f)
     scores = np.convolve(scores_raw, kernel, mode='same')
-    
     scores[~mask] = 0
     return times, scores
 
 
 def find_best_fusion(y, sr, clip_dur, t_start, t_end):
-    # Вземаме сурови резултати
     t1, s1 = find_best_smart_bell(y, sr, clip_dur, t_start, t_end)
     _, s2 = find_best_percussive(y, sr, clip_dur, t_start, t_end)
     _, s3 = find_best_chorus(y, sr, clip_dur, t_start, t_end)
     _, s4 = find_best_onset(y, sr, clip_dur, t_start, t_end)
-    
-    # Нормализация
     s1 /= (np.max(s1) + 1e-9)
     s2 /= (np.max(s2) + 1e-9)
     s3 /= (np.max(s3) + 1e-9)
     s4 /= (np.max(s4) + 1e-9)
-    
-    # Гласуване (тегла)
     fusion = (s1 * 0.4) + (s4 * 0.3) + (s2 * 0.2) + (s3 * 0.1)
     return t1, fusion
 
@@ -223,11 +212,7 @@ def top_candidates(times, scores, clip_dur, sr, n=3):
 
 def _find_and_set_ffmpeg():
     """
-    Търси ffmpeg.exe и го задава по ВСИЧКИ начини, които pydub проверява.
-    Реда на търсене:
-      1. Папката на текущия .py файл (__file__)
-      2. Папката на стартирания файл (sys.argv[0])
-      3. System PATH
+    Търси ffmpeg и го задава по всички начини, които pydub проверява.
     """
     import shutil
     from pydub import AudioSegment
@@ -248,21 +233,19 @@ def _find_and_set_ffmpeg():
     for folder in candidates:
         path = os.path.join(folder, ffmpeg_name)
         if os.path.isfile(path):
-            # Задай по ВСИЧКИ начини едновременно
-            pydub_utils.converter   = path
-            AudioSegment.converter  = path
-            AudioSegment.ffmpeg     = path
-            # ffprobe: ако има ffprobe.exe до ffmpeg, използвай него; иначе – ffmpeg
-            ffprobe_path = os.path.join(folder, "ffprobe.exe" if sys.platform == "win32" else "ffprobe")
+            pydub_utils.converter  = path
+            AudioSegment.converter = path
+            AudioSegment.ffmpeg    = path
+            # FIX #6: get_prober_name не е settable атрибут – задаваме ffprobe
+            # директно върху AudioSegment, което pydub наистина чете.
+            ffprobe_name = "ffprobe.exe" if sys.platform == "win32" else "ffprobe"
+            ffprobe_path = os.path.join(folder, ffprobe_name)
             if not os.path.isfile(ffprobe_path):
-                ffprobe_path = path  # ffmpeg може да свърши работата
-            pydub_utils.get_prober_name = lambda: ffprobe_path
+                ffprobe_path = path
             AudioSegment.ffprobe = ffprobe_path
-            # Добави папката и в PATH на процеса
             os.environ["PATH"] = folder + os.pathsep + os.environ.get("PATH", "")
             return path
 
-    # System PATH
     found = shutil.which("ffmpeg")
     if found:
         return found
@@ -270,12 +253,10 @@ def _find_and_set_ffmpeg():
     return None
 
 
-# Задай ffmpeg веднага при зареждане на модула
 _FFMPEG_PATH = _find_and_set_ffmpeg()
 
 
 def check_ffmpeg():
-    """Хвърля RuntimeError ако ffmpeg не е намерен."""
     if _FFMPEG_PATH is None:
         raise RuntimeError(
             "ffmpeg не е намерен!\n\n"
@@ -288,34 +269,30 @@ def build_af_filter(fade_in, fade_out, dur_sec, opts: dict) -> str:
     """Строи ffmpeg -af филтър верига от аудио настройките."""
     filters = []
 
-    # Сила (volume)
     vol_db = opts.get("volume_db", 0.0)
     if abs(vol_db) > 0.01:
         filters.append(f"volume={vol_db:.2f}dB")
 
-    # Bass boost – low shelf @ 100 Hz
     bass_db = opts.get("bass_db", 0.0)
     if abs(bass_db) > 0.01:
         filters.append(f"equalizer=f=100:width_type=o:width=2:g={bass_db:.2f}")
 
-    # Treble boost – high shelf @ 8000 Hz
     treble_db = opts.get("treble_db", 0.0)
     if abs(treble_db) > 0.01:
         filters.append(f"equalizer=f=8000:width_type=o:width=2:g={treble_db:.2f}")
 
-    # Нормализация
     if opts.get("normalize", True):
         mode = opts.get("norm_mode", "lufs")
         if mode == "lufs":
             target = opts.get("norm_target", -14.0)
-            # двупроходна loudnorm
+            # NOTE #7: loudnorm в единичен проход е приблизителен;
+            # за точен резултат е нужен двупроходен анализ.
             filters.append(f"loudnorm=I={target:.1f}:LRA=11:TP=-1.5")
-        else:  # peak
+        else:
             target = opts.get("norm_target", -1.0)
-            filters.append(f"dynaudnorm=p=0.9:m=100")
+            filters.append("dynaudnorm=p=0.9:m=100")
             filters.append(f"volume={target:.2f}dB")
 
-    # Fade in / out
     fade_out_start = max(0.0, dur_sec - fade_out)
     if fade_in > 0.01:
         filters.append(f"afade=t=in:d={fade_in:.3f}")
@@ -326,7 +303,7 @@ def build_af_filter(fade_in, fade_out, dur_sec, opts: dict) -> str:
 
 
 def cut_and_save(filepath, start_sec, dur_sec, output_path, fade_in, fade_out, audio_opts=None):
-    """Реже аудио директно с ffmpeg – без pydub, без ffprobe."""
+    """Реже аудио директно с ffmpeg."""
     import subprocess
     check_ffmpeg()
     if audio_opts is None:
@@ -349,7 +326,6 @@ def cut_and_save(filepath, start_sec, dur_sec, output_path, fade_in, fade_out, a
         "-ar", "44100",
         "-ac", "2",
     ]
-    # Битрейт само за MP3/AAC
     ext = os.path.splitext(output_path)[1].lower()
     if ext in (".mp3", ".aac", ".m4a", ".ogg"):
         cmd += ["-b:a", bitrate]
@@ -375,21 +351,43 @@ class BellCutterApp(ctk.CTk):
         self.resizable(True, True)
         self.configure(fg_color=BG_MAIN)
 
+        # FIX #8: Lock за thread-safe достъп до аудио данните
+        self._audio_lock = threading.Lock()
         self._y = None
         self._sr = None
         self._total_dur = 0.0
-        self._best_time = None
-        self._candidates = []
-        self._preview_file = None
+
+        self._best_time  = None
         self._processing = False
+
+        # FIX #1: Инициализираме атрибутите преди _build_ui,
+        # така че никой метод не може да ги достигне неинициализирани.
+        self._selected_idx  = 0
+        self._cand_vars     = []
+        self._cand_buttons  = []
+        # FIX #9: Премахнат мъртвия атрибут _preview_file
 
         self._build_ui()
         self._check_ffmpeg_on_start()
 
+        # FIX #16: Спираме pygame чисто при затваряне на прозореца
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    # ── Lifecycle ──────────────────────────────
+
+    def _on_close(self):
+        """Чисто затваряне: спира pygame и унищожава прозореца."""
+        if PYGAME_OK:
+            try:
+                pygame.mixer.music.stop()
+                pygame.mixer.quit()
+            except Exception:
+                pass
+        self.destroy()
+
     # ── UI builder ──────────────────────────────
 
     def _check_ffmpeg_on_start(self):
-        """Показва статус за ffmpeg в заглавието при стартиране."""
         if _FFMPEG_PATH:
             self.title(f"🔔 School Bell Cutter  ✅ ffmpeg: {os.path.basename(_FFMPEG_PATH)}")
         else:
@@ -425,7 +423,6 @@ class BellCutterApp(ctk.CTk):
         ctk.CTkButton(row, text="Избери…", width=110,
                       command=self._pick_input).pack(side="left")
 
-        # Информация за песента
         self.song_info = ctk.CTkLabel(scroll, text="", text_color=FG_MUTED,
                                       font=ctk.CTkFont(size=11))
         self.song_info.pack(padx=20, anchor="w")
@@ -437,20 +434,20 @@ class BellCutterApp(ctk.CTk):
 
         ctk.CTkLabel(wf, text="От (сек):", width=80).grid(row=0, column=0, sticky="w")
         self.start_var = ctk.StringVar(value="0")
-        ctk.CTkEntry(wf, textvariable=self.start_var, width=90).grid(row=0, column=1, padx=(0,20))
+        ctk.CTkEntry(wf, textvariable=self.start_var, width=90).grid(row=0, column=1, padx=(0, 20))
 
         ctk.CTkLabel(wf, text="До (сек):", width=80).grid(row=0, column=2, sticky="w")
         self.end_var = ctk.StringVar(value="(края)")
-        ctk.CTkEntry(wf, textvariable=self.end_var, width=90).grid(row=0, column=3, padx=(0,20))
+        ctk.CTkEntry(wf, textvariable=self.end_var, width=90).grid(row=0, column=3, padx=(0, 20))
 
         ctk.CTkLabel(wf, text="💡 Остави 'До' празно = цялата песен",
                      text_color=FG_MUTED, font=ctk.CTkFont(size=11)).grid(
-            row=1, column=0, columnspan=4, sticky="w", pady=(4,0))
+            row=1, column=0, columnspan=4, sticky="w", pady=(4, 0))
 
         # ── Секция: Настройки ──
         self._section(scroll, "⚙️  Настройки")
         sf = ctk.CTkFrame(scroll, fg_color="transparent")
-        sf.pack(fill="x", padx=20, pady=(0,8))
+        sf.pack(fill="x", padx=20, pady=(0, 8))
 
         # Дължина
         ctk.CTkLabel(sf, text="Дължина (сек):", width=150, anchor="w").grid(
@@ -469,13 +466,14 @@ class BellCutterApp(ctk.CTk):
         ctk.CTkLabel(sf, text="Метод:", width=150, anchor="w").grid(
             row=1, column=0, sticky="w", pady=4)
         self.method_var = ctk.StringVar(value="fusion")
+        # FIX #5: Премахнат command=self._on_method_change (референцираше
+        # несъществуващ self.method_desc). Методът е изтрит по-долу.
         method_menu = ctk.CTkOptionMenu(
             sf, variable=self.method_var,
             values=list(METHODS.keys()),
             width=200)
         method_menu.grid(row=1, column=1, sticky="w")
-        
-        # Бутон за информация
+
         ctk.CTkButton(sf, text="ℹ️", width=40,
                       fg_color="#444466", hover_color="#555588",
                       command=self._show_algo_info).grid(row=1, column=1, sticky="e", padx=(0, 40))
@@ -510,35 +508,35 @@ class BellCutterApp(ctk.CTk):
         af.pack(fill="x", padx=20, pady=(0, 8))
         af.columnconfigure(1, weight=1)
 
-        def _slider_row(parent, row, label, var, from_, to_, default, fmt="{:.1f}", suffix="dB", width=260):
+        def _slider_row(parent, row, label, var, from_, to_, default,
+                        fmt="{:.1f}", suffix="dB", width=260):
             ctk.CTkLabel(parent, text=label, width=155, anchor="w").grid(
                 row=row, column=0, sticky="w", padx=12, pady=6)
             inner = ctk.CTkFrame(parent, fg_color="transparent")
-            inner.grid(row=row, column=1, sticky="w", padx=(0,12))
+            inner.grid(row=row, column=1, sticky="w", padx=(0, 12))
             lbl = ctk.CTkLabel(inner, text=fmt.format(default) + f" {suffix}", width=80)
-            
-            # Динамично обновяване, което чете текущия suffix от sl
-            def _upd(v, sl=None): 
-                sl.unit_label.configure(text=f"{sl.fmt.format(float(v))} {sl.unit_suffix}")
-            
-            sl = ctk.CTkSlider(inner, from_=from_, to=to_, variable=var,
-                               width=width)
+
+            def _upd(v, sl=None):
+                sl.unit_label.configure(
+                    text=f"{sl.fmt.format(float(v))} {sl.unit_suffix}")
+
+            sl = ctk.CTkSlider(inner, from_=from_, to=to_, variable=var, width=width)
             sl.configure(command=lambda v: _upd(v, sl))
             sl.pack(side="left")
             lbl.pack(side="left", padx=6)
-            sl.unit_label = lbl 
+            sl.unit_label  = lbl
             sl.unit_suffix = suffix
-            sl.fmt = fmt
+            sl.fmt         = fmt
             return sl
 
         # Нормализация toggle + mode + target
         norm_row = ctk.CTkFrame(af, fg_color="transparent")
-        norm_row.grid(row=0, column=0, columnspan=2, sticky="w", padx=12, pady=(10,4))
+        norm_row.grid(row=0, column=0, columnspan=2, sticky="w", padx=12, pady=(10, 4))
         self.norm_var = ctk.BooleanVar(value=True)
         norm_cb = ctk.CTkCheckBox(norm_row, text="Нормализация", variable=self.norm_var,
                                    command=self._toggle_norm, width=140)
         norm_cb.pack(side="left")
-        ctk.CTkLabel(norm_row, text="Режим:", width=60).pack(side="left", padx=(16,4))
+        ctk.CTkLabel(norm_row, text="Режим:", width=60).pack(side="left", padx=(16, 4))
         self.norm_mode_var = ctk.StringVar(value="lufs")
         norm_mode_menu = ctk.CTkOptionMenu(
             norm_row, variable=self.norm_mode_var,
@@ -550,33 +548,26 @@ class BellCutterApp(ctk.CTk):
             text_color=FG_MUTED, font=ctk.CTkFont(size=11))
         self.norm_mode_hint.pack(side="left")
 
-        # Target slider  (LUFS: -6 до -23 | peak: -0.1 до -6)
         self.norm_target_var = ctk.DoubleVar(value=-14.0)
         self.norm_target_slider = _slider_row(
             af, 1, "Target ниво:", self.norm_target_var,
             -23, -6, -14.0, "{:.1f}", "LUFS")
 
-        # Separator
         ctk.CTkFrame(af, fg_color="#333344", height=1).grid(
             row=2, column=0, columnspan=2, sticky="ew", padx=12, pady=6)
 
-        # Volume
         self.vol_var = ctk.DoubleVar(value=0.0)
         _slider_row(af, 3, "Сила (Volume):", self.vol_var, -12, 12, 0.0, "{:+.1f}", "dB")
 
-        # Bass
         self.bass_var = ctk.DoubleVar(value=0.0)
         _slider_row(af, 4, "Баси (Bass):", self.bass_var, -10, 10, 0.0, "{:+.1f}", "dB")
 
-        # Treble
         self.treble_var = ctk.DoubleVar(value=0.0)
         _slider_row(af, 5, "Високи (Treble):", self.treble_var, -10, 10, 0.0, "{:+.1f}", "dB")
 
-        # Separator
         ctk.CTkFrame(af, fg_color="#333344", height=1).grid(
             row=6, column=0, columnspan=2, sticky="ew", padx=12, pady=6)
 
-        # Битрейт
         bitrate_row = ctk.CTkFrame(af, fg_color="transparent")
         bitrate_row.grid(row=7, column=0, columnspan=2, sticky="w", padx=12, pady=(0, 10))
         ctk.CTkLabel(bitrate_row, text="Битрейт (MP3):", width=155).pack(side="left")
@@ -592,7 +583,7 @@ class BellCutterApp(ctk.CTk):
         self.output_var = ctk.StringVar(value="")
         ctk.CTkEntry(or_, textvariable=self.output_var,
                      placeholder_text="По подразбиране: <оригинал>_bell.mp3",
-                     width=520).pack(side="left", padx=(0,8))
+                     width=520).pack(side="left", padx=(0, 8))
         ctk.CTkButton(or_, text="Запази като…", width=110,
                       command=self._pick_output).pack(side="left")
 
@@ -641,18 +632,21 @@ class BellCutterApp(ctk.CTk):
         self.norm_target_slider.configure(state=state)
 
     def _on_norm_mode(self, mode):
-        # Update slider range and unit
+        # FIX #4: Синхронизираме unit_suffix и fmt заедно с диапазона
         suffix = "LUFS" if mode == "lufs" else "dB"
-        val = -14.0 if mode == "lufs" else -1.0
-        
-        self.norm_target_slider.configure(from_=-23 if mode=="lufs" else -6, 
-                                          to=-6 if mode=="lufs" else -0.1)
+        val    = -14.0  if mode == "lufs" else -1.0
+        from_  = -23    if mode == "lufs" else -6
+        to_    = -6     if mode == "lufs" else -0.1
+
+        self.norm_target_slider.configure(from_=from_, to=to_)
         self.norm_target_var.set(val)
-        
-        # Update label text directly
+
+        # Обновяваме атрибутите на слайдера, за да останат синхронизирани
+        self.norm_target_slider.unit_suffix = suffix
         self.norm_target_slider.unit_label.configure(text=f"{val:.1f} {suffix}")
-        
-        hint = "  LUFS = loudness стандарт (препоръчително)" if mode == "lufs" else "  Peak = максимална стойност (dB)"
+
+        hint = ("  LUFS = loudness стандарт (препоръчително)"
+                if mode == "lufs" else "  Peak = максимална стойност (dB)")
         self.norm_mode_hint.configure(text=hint)
 
     def _show_algo_info(self):
@@ -660,33 +654,38 @@ class BellCutterApp(ctk.CTk):
         popup.title("Информация за алгоритмите")
         popup.geometry("600x450")
         popup.grab_set()
-        
+
         info_text = (
             "🚀 Fusion: Комбинира най-доброто от всички методи чрез тегловно гласуване за максимална точност.\n\n"
-            "🔔 Smart Bell: Съчетава ударни атаки (Onset detection) и обща енергия (RMS) за откриване на звуци с 'удар' като звънец.\n\n"
+            "🔔 Smart Bell: Съчетава ударни атаки (Onset detection) и обща енергия (RMS) за "
+            "откриване на звуци с 'удар' като звънец.\n\n"
             "🥁 Beat: Анализира темпото на песента и търси най-подходящите удари.\n\n"
             "⚡ Energy: Фокусира се върху частите от песента с най-висока средна сила на звука.\n\n"
             "🎵 Chorus: Търси повтарящи се структури в песента (напр. припев).\n\n"
             "🎯 Onset: Идентифицира прецизното начало на звукови събития.\n\n"
             "🥁 Percussive: Изолира ударните елементи (барабани и удари) чрез спектрален анализ."
         )
-        
+
         txt = ctk.CTkTextbox(popup, width=560, height=350, fg_color="transparent")
         txt.insert("0.0", info_text)
         txt.configure(state="disabled")
         txt.pack(padx=20, pady=20)
-        
+
         ctk.CTkButton(popup, text="Затвори", command=popup.destroy).pack(pady=10)
 
     def _stop_preview(self):
+        """FIX #2 + #10: Спира pygame и освобождава файла безопасно."""
         if PYGAME_OK:
-            pygame.mixer.music.stop()
+            try:
+                pygame.mixer.music.stop()
+                # unload() е добавен в pygame 2.0 – проверяваме преди извикване
+                if hasattr(pygame.mixer.music, "unload"):
+                    pygame.mixer.music.unload()
+            except Exception:
+                pass
 
     def _update_dur_label(self, v):
         self.dur_label.configure(text=f"{float(v):.0f} сек")
-
-    def _on_method_change(self, val):
-        self.method_desc.configure(text=METHODS[val][0])
 
     def _pick_input(self):
         path = filedialog.askopenfilename(
@@ -702,7 +701,9 @@ class BellCutterApp(ctk.CTk):
         try:
             y, sr = librosa.load(path, sr=None, mono=True)
             dur   = librosa.get_duration(y=y, sr=sr)
-            self._y, self._sr, self._total_dur = y, sr, dur
+            # FIX #8: Записваме аудио данните под lock
+            with self._audio_lock:
+                self._y, self._sr, self._total_dur = y, sr, dur
             self.after(0, lambda: self.song_info.configure(
                 text=f"⏱  Дължина: {fmt_time(dur)}  |  Честота: {sr} Hz  |  "
                      f"Файл: {os.path.basename(path)}"))
@@ -726,7 +727,10 @@ class BellCutterApp(ctk.CTk):
         if not self.input_var.get() or self.input_var.get().startswith("Не е"):
             messagebox.showwarning("Внимание", "Избери входен аудио файл.")
             return
-        if self._y is None:
+        # FIX #8: Четем под lock
+        with self._audio_lock:
+            y_ready = self._y is not None
+        if not y_ready:
             messagebox.showwarning("Внимание", "Изчакай зареждането на файла.")
             return
         if self._processing:
@@ -744,34 +748,43 @@ class BellCutterApp(ctk.CTk):
             clip_dur = float(self.dur_var.get())
             try:
                 t_start = float(self.start_var.get())
-            except Exception:
+            except ValueError:
                 t_start = 0.0
             try:
                 t_end_raw = self.end_var.get().strip()
                 t_end = float(t_end_raw) if t_end_raw not in ("", "(края)") else self._total_dur
-            except Exception:
+            except ValueError:
                 t_end = self._total_dur
 
-            t_end = min(t_end, self._total_dur)
+            # FIX #8: Правим локално копие под lock за thread-safe анализ
+            with self._audio_lock:
+                y  = self._y.copy() if self._y is not None else None
+                sr = self._sr
+                total_dur = self._total_dur
+
+            if y is None:
+                raise ValueError("Аудиото не е заредено.")
+
+            t_end = min(t_end, total_dur)
 
             if t_end - t_start < clip_dur:
                 raise ValueError(
-                    f"Прозорецът ({t_end-t_start:.1f}s) е по-малък от исканата дължина ({clip_dur}s).")
+                    f"Прозорецът ({t_end - t_start:.1f}s) е по-малък от "
+                    f"исканата дължина ({clip_dur}s).")
 
             self._status("Анализирам аудио…", 0.3)
             method_fn = METHODS[self.method_var.get()][1]
-            times, scores = method_fn(self._y, self._sr, clip_dur, t_start, t_end)
+            times, scores = method_fn(y, sr, clip_dur, t_start, t_end)
 
             self._status("Намирам топ кандидати…", 0.7)
-            cands = top_candidates(times, scores, clip_dur, self._sr, n=5)
+            cands = top_candidates(times, scores, clip_dur, sr, n=5)
 
-            self._candidates = cands
             self._best_time  = cands[0][0] if cands else 0.0
 
             self._status("Готово! ✅", 1.0)
             self.after(0, lambda: self._show_results(cands, clip_dur))
         except Exception as ex:
-            msg = str(ex) if str(ex) and str(ex).strip() not in ("None", "") else repr(ex)
+            msg = str(ex) if str(ex).strip() not in ("", "None") else repr(ex)
             self.after(0, lambda m=msg: messagebox.showerror("Грешка при анализ", m))
             self.after(0, lambda m=msg: self._status(f"❌ {m[:60]}", 0))
         finally:
@@ -796,40 +809,42 @@ class BellCutterApp(ctk.CTk):
                          text_color=DANGER).pack(pady=12)
             return
 
-        self._selected_idx = 0 
-        self._cand_vars = [] 
-        self._cand_buttons = [] # Нулиране
+        self._selected_idx = 0
+        self._cand_vars    = []
+        self._cand_buttons = []
 
         for rank, (t_orig, score) in enumerate(cands):
-            # Променливи за този кандидат в MM:SS.ss формат
             sv = ctk.StringVar(value=format_time_ms(t_orig))
             ev = ctk.StringVar(value=format_time_ms(t_orig + clip_dur))
             self._cand_vars.append({
-                "start": sv, "end": ev, "orig_start": t_orig, "orig_dur": clip_dur
+                "start": sv, "end": ev,
+                "orig_start": t_orig, "orig_dur": clip_dur
             })
 
             outer = ctk.CTkFrame(self.results_frame, fg_color="#252535", corner_radius=10)
             outer.pack(fill="x", padx=10, pady=8)
 
-            # Ред 1: Заглавие, Бар за резултат, Бутон за избор
+            # Ред 1: Заглавие, Score bar, Бутон за избор
             top_row = ctk.CTkFrame(outer, fg_color="transparent")
             top_row.pack(fill="x", padx=10, pady=(10, 5))
 
             badge_color = ACCENT if rank == 0 else "#444466"
             ctk.CTkLabel(top_row, text=f" #{rank + 1} ", fg_color=badge_color,
                          corner_radius=6, font=ctk.CTkFont(size=12, weight="bold"),
-                         width=36).pack(side="left", padx=(0,10))
+                         width=36).pack(side="left", padx=(0, 10))
 
-            # Score bar
-            bar_frame = ctk.CTkFrame(top_row, fg_color="#1a1a2e", width=120, height=8, corner_radius=4)
+            bar_frame = ctk.CTkFrame(top_row, fg_color="#1a1a2e",
+                                     width=120, height=8, corner_radius=4)
             bar_frame.pack(side="left", padx=5)
             bar_frame.pack_propagate(False)
             norm = score / (cands[0][1] + 1e-9)
-            ctk.CTkFrame(bar_frame, fg_color=ACCENT, width=int(120 * norm), height=8, corner_radius=4).place(x=0, y=0)
+            ctk.CTkFrame(bar_frame, fg_color=ACCENT,
+                         width=int(120 * norm), height=8, corner_radius=4).place(x=0, y=0)
 
-            # Select button
             sel_btn = ctk.CTkButton(
-                top_row, text="✔ Избери", width=80, height=28,
+                top_row,
+                text="✔ Избран" if rank == 0 else "✔ Избери",
+                width=80, height=28,
                 fg_color="#2d5016" if rank == 0 else "#333344",
                 hover_color="#3d7020",
                 command=lambda r=rank: self._select_candidate(r))
@@ -840,38 +855,42 @@ class BellCutterApp(ctk.CTk):
             ctrl_row = ctk.CTkFrame(outer, fg_color="#1e1e2e", corner_radius=6)
             ctrl_row.pack(fill="x", padx=10, pady=5)
 
-            # Start controls
-            ctk.CTkLabel(ctrl_row, text="Старт:", font=ctk.CTkFont(size=11)).pack(side="left", padx=(5,2))
-            ctk.CTkButton(ctrl_row, text="-", width=24, height=24, command=lambda r=rank: self._adj_time(r, "start", -1)).pack(side="left", padx=1)
-            ctk.CTkEntry(ctrl_row, textvariable=sv, width=70, height=24, font=ctk.CTkFont(size=12)).pack(side="left", padx=2)
-            ctk.CTkButton(ctrl_row, text="+", width=24, height=24, command=lambda r=rank: self._adj_time(r, "start", 1)).pack(side="left", padx=1)
+            ctk.CTkLabel(ctrl_row, text="Старт:", font=ctk.CTkFont(size=11)).pack(side="left", padx=(5, 2))
+            # FIX #11: Стъпка 0.5 сек вместо 1 сек за по-прецизна корекция
+            ctk.CTkButton(ctrl_row, text="-", width=24, height=24,
+                          command=lambda r=rank: self._adj_time(r, "start", -0.5)).pack(side="left", padx=1)
+            ctk.CTkEntry(ctrl_row, textvariable=sv, width=70, height=24,
+                         font=ctk.CTkFont(size=12)).pack(side="left", padx=2)
+            ctk.CTkButton(ctrl_row, text="+", width=24, height=24,
+                          command=lambda r=rank: self._adj_time(r, "start", 0.5)).pack(side="left", padx=1)
 
-            # End controls
-            ctk.CTkLabel(ctrl_row, text=" Край:", font=ctk.CTkFont(size=11)).pack(side="left", padx=(10,2))
-            ctk.CTkButton(ctrl_row, text="-", width=24, height=24, command=lambda r=rank: self._adj_time(r, "end", -1)).pack(side="left", padx=1)
-            ctk.CTkEntry(ctrl_row, textvariable=ev, width=70, height=24, font=ctk.CTkFont(size=12)).pack(side="left", padx=2)
-            ctk.CTkButton(ctrl_row, text="+", width=24, height=24, command=lambda r=rank: self._adj_time(r, "end", 1)).pack(side="left", padx=1)
+            ctk.CTkLabel(ctrl_row, text=" Край:", font=ctk.CTkFont(size=11)).pack(side="left", padx=(10, 2))
+            ctk.CTkButton(ctrl_row, text="-", width=24, height=24,
+                          command=lambda r=rank: self._adj_time(r, "end", -0.5)).pack(side="left", padx=1)
+            ctk.CTkEntry(ctrl_row, textvariable=ev, width=70, height=24,
+                         font=ctk.CTkFont(size=12)).pack(side="left", padx=2)
+            ctk.CTkButton(ctrl_row, text="+", width=24, height=24,
+                          command=lambda r=rank: self._adj_time(r, "end", 0.5)).pack(side="left", padx=1)
 
-            # Reset button
-            ctk.CTkButton(ctrl_row, text="🔄", width=32, height=24, fg_color="#444455", command=lambda r=rank: self._reset_cand(r)).pack(side="left", padx=(10,0))
+            ctk.CTkButton(ctrl_row, text="🔄", width=32, height=24,
+                          fg_color="#444455",
+                          command=lambda r=rank: self._reset_cand(r)).pack(side="left", padx=(10, 0))
 
-            # Продължителност (динамично изчисляване)
             dv = ctk.StringVar()
             def _upd_dur(*args, s=sv, e=ev, d=dv):
                 try:
                     dur = parse_time(e.get()) - parse_time(s.get())
-                    if dur > 0:
-                        d.set(f"⏱ {dur:.2f} сек")
-                    else:
-                        d.set("⚠️ Невалидно")
-                except: d.set("⚠️ Грешка")
-            
+                    d.set(f"⏱ {dur:.2f} сек" if dur > 0 else "⚠️ Невалидно")
+                except (ValueError, AttributeError):
+                    d.set("⚠️ Грешка")
+
             sv.trace_add("write", _upd_dur)
             ev.trace_add("write", _upd_dur)
-            _upd_dur() # Инициализация
-            
-            ctk.CTkLabel(ctrl_row, textvariable=dv, font=ctk.CTkFont(size=11, slant="italic"), 
-                         text_color=SUCCESS).pack(side="left", padx=(15,0))
+            _upd_dur()
+
+            ctk.CTkLabel(ctrl_row, textvariable=dv,
+                         font=ctk.CTkFont(size=11, slant="italic"),
+                         text_color=SUCCESS).pack(side="left", padx=(15, 0))
 
             # Ред 3: Play/Stop
             btn_row = ctk.CTkFrame(outer, fg_color="transparent")
@@ -883,48 +902,55 @@ class BellCutterApp(ctk.CTk):
                     fg_color="#1a3a5c", hover_color="#1e4d80",
                     command=lambda r=rank: self._preview_cand(r)
                 ).pack(side="left", padx=(0, 5))
-                
+
                 ctk.CTkButton(
                     btn_row, text="⏹ Спри", width=74, height=28,
                     fg_color="#5c1a1a", hover_color="#801e1e",
                     command=self._stop_preview
                 ).pack(side="left")
 
-        self._best_time = cands[0][0] # Първоначално задаване
+        self._best_time = cands[0][0]
         self.cut_btn.configure(state="normal")
 
     def _adj_time(self, rank, field, delta):
+        """FIX #11: delta е 0.5 сек (по-прецизно от 1 сек)."""
         try:
             var = self._cand_vars[rank][field]
             val = parse_time(var.get()) + delta
-            var.set(format_time_ms(max(0, val)))
-        except: pass
+            var.set(format_time_ms(max(0.0, val)))
+        except (IndexError, KeyError):
+            pass
 
     def _reset_cand(self, rank):
-        data = self._cand_vars[rank]
-        data["start"].set(format_time_ms(data["orig_start"]))
-        data["end"].set(format_time_ms(data["orig_start"] + data["orig_dur"]))
+        try:
+            data = self._cand_vars[rank]
+            data["start"].set(format_time_ms(data["orig_start"]))
+            data["end"].set(format_time_ms(data["orig_start"] + data["orig_dur"]))
+        except (IndexError, KeyError):
+            pass
 
     def _select_candidate(self, rank):
         self._selected_idx = rank
         for i, btn in enumerate(self._cand_buttons):
-            btn.configure(fg_color="#2d5016" if i == rank else "#333344",
-                          text="✔ Избран" if i == rank else "✔ Избери")
+            btn.configure(
+                fg_color="#2d5016" if i == rank else "#333344",
+                text="✔ Избран" if i == rank else "✔ Избери")
 
     def _preview_cand(self, rank):
         try:
             start = parse_time(self._cand_vars[rank]["start"].get())
-            end = parse_time(self._cand_vars[rank]["end"].get())
-            dur = end - start
-            if dur <= 0: return
+            end   = parse_time(self._cand_vars[rank]["end"].get())
+            dur   = end - start
+            if dur <= 0:
+                return
             self._preview(start, dur)
-        except: pass
+        except (IndexError, KeyError):
+            pass
 
     def _preview(self, start_sec, dur_sec):
         if not PYGAME_OK:
             return
-        
-        # Вземи текущите аудио настройки, за да се чуват и в прегледа
+
         audio_settings = {
             "volume_db":   self.vol_var.get(),
             "bass_db":     self.bass_var.get(),
@@ -939,24 +965,25 @@ class BellCutterApp(ctk.CTk):
         def worker():
             try:
                 check_ffmpeg()
-                script_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
-                cache_dir  = os.path.join(script_dir, "song_cache")
+                script_dir  = os.path.dirname(os.path.abspath(sys.argv[0]))
+                cache_dir   = os.path.join(script_dir, "song_cache")
                 os.makedirs(cache_dir, exist_ok=True)
                 preview_path = os.path.join(cache_dir, "preview.wav")
 
-                pygame.mixer.music.stop()
-                pygame.mixer.music.unload()
-                import time; time.sleep(0.15)
+                # FIX #10: Спираме и unload-ваме преди да презапишем файла,
+                # за да освободим OS-заключването.
+                self._stop_preview()
+                import time; time.sleep(0.2)
 
-                # Използваме същата логика за филтри като при запис
                 af = build_af_filter(fade_in, fade_out, dur_sec, audio_settings)
-
                 cmd = [
-                    _FFMPEG_PATH, "-y", "-ss", str(round(start_sec, 3)),
+                    _FFMPEG_PATH, "-y",
+                    "-ss", str(round(start_sec, 3)),
                     "-i",  self.input_var.get(),
                     "-t",  str(round(dur_sec, 3)),
                     "-af", af,
-                    "-ar", "44100", "-ac", "2", preview_path
+                    "-ar", "44100", "-ac", "2",
+                    preview_path
                 ]
                 import subprocess
                 result = subprocess.run(cmd, capture_output=True)
@@ -966,24 +993,30 @@ class BellCutterApp(ctk.CTk):
                 pygame.mixer.music.load(preview_path)
                 pygame.mixer.music.play()
             except Exception as ex:
-                msg = str(ex) if str(ex) and str(ex).strip() not in ("None", "") else repr(ex)
-                self.after(0, lambda m=msg: messagebox.showwarning("Предварителен преглед", f"Грешка: {m}"))
+                msg = str(ex) if str(ex).strip() not in ("", "None") else repr(ex)
+                self.after(0, lambda m=msg: messagebox.showwarning(
+                    "Предварителен преглед", f"Грешка: {m}"))
 
         threading.Thread(target=worker, daemon=True).start()
 
     # ── Рязане ─────────────────────────────────
 
     def _do_cut(self):
+        # FIX #14: Валидираме start < end, не само clip_dur > 0
         try:
-            rank = self._selected_idx
+            rank  = self._selected_idx
             start = parse_time(self._cand_vars[rank]["start"].get())
-            end = parse_time(self._cand_vars[rank]["end"].get())
+            end   = parse_time(self._cand_vars[rank]["end"].get())
             clip_dur = end - start
-            if clip_dur <= 0:
-                messagebox.showwarning("Внимание", "Невалидна дължина.")
-                return
-        except:
-            messagebox.showwarning("Внимание", "Провери времената на избрания кандидат.")
+        except (IndexError, KeyError):
+            messagebox.showwarning("Внимание", "Провери избрания кандидат.")
+            return
+
+        if start >= end:
+            messagebox.showwarning("Внимание", "Началото трябва да е преди края.")
+            return
+        if clip_dur <= 0:
+            messagebox.showwarning("Внимание", "Невалидна дължина.")
             return
 
         filepath = self.input_var.get()
@@ -1010,10 +1043,11 @@ class BellCutterApp(ctk.CTk):
 
         def worker():
             try:
-                real_len = cut_and_save(filepath, start, clip_dur, output, fade_in, fade_out, audio_settings)
+                real_len = cut_and_save(filepath, start, clip_dur,
+                                        output, fade_in, fade_out, audio_settings)
                 self.after(0, lambda: self._on_cut_done(output, start, real_len))
             except Exception as ex:
-                err_msg = str(ex) if str(ex) and str(ex).strip() != "None" else repr(ex)
+                err_msg = str(ex) if str(ex).strip() not in ("", "None") else repr(ex)
                 self.after(0, lambda m=err_msg: messagebox.showerror("Грешка при рязане", m))
                 self.after(0, lambda m=err_msg: self._status(f"❌ {m[:60]}", 0))
             finally:
@@ -1024,9 +1058,9 @@ class BellCutterApp(ctk.CTk):
 
     def _on_cut_done(self, output, start, real_len):
         self.progress.set(1.0)
-        self.status_label.configure(text=f"✅ Готово! Запазен: {os.path.basename(output)}")
+        self.status_label.configure(
+            text=f"✅ Готово! Запазен: {os.path.basename(output)}")
 
-        # Диалог за успех
         msg = (f"✅ Звънецът е запазен успешно!\n\n"
                f"📁 Файл:    {output}\n"
                f"⏱  Начало:  {fmt_time(start)}\n"
